@@ -151,7 +151,7 @@ fn calculate_probability(prefix: &str, is_regex: bool) -> f64 {
     let alphabet_size = ONION_ALPHABET.len() as f64;
     
     if is_regex {
-        todo!();
+        println!("Probability checking from regex is not yet implemented.....using standard checking...");
         let approx_pattern_length = prefix.len() as f64;
         return 1.0 / alphabet_size.powf(approx_pattern_length);
     } else {
