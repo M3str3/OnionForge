@@ -1,0 +1,10 @@
+[package]
+name = "onionforge"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+torut = "0.2"
+rand = "0.8"
+num_cpus = "1.13"
+regex = "1.10.4"
