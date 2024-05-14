@@ -15,7 +15,7 @@ To run the program, use the following command:
 cargo run --release <prefix> [--simulate] [--no-stop]
 ```
 
-- `<prefix>`: The prefix you want the .onion address to start with. If it starts with /r, it is treated as a regex pattern.
+- `<prefix>`: The prefix you want the .onion address to start with. If it starts with r/, it is treated as a regex pattern.
 - `--simulate`: Run the program in simulation mode for 10 seconds to estimate generation time.
 - `--no-stop`: Continue generating and saving keys even after finding a match.
 
