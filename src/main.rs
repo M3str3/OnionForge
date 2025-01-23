@@ -7,12 +7,13 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     
     if args.len() < 2 {
-        eprintln!("Usage: {} <prefix> [--simulate] [--no-stop]", args[0]);
+        eprintln!("Usage: {} <prefix> [--no-header] [--simulate] [--no-stop]", args[0]);
         return;
     }
     
     let simulate = args.contains(&"--simulate".to_string());
     let no_stop = args.contains(&"--no-stop".to_string());
+    let no_header = args.contains(&"--no-header".to_string());
     let prefix = args[1].clone();
     let is_regex = prefix.starts_with("r/");
 
@@ -32,6 +33,12 @@ fn main() {
         println!("[#] Simulation mode activated. Running for 10 seconds to estimate generation time...");
         run_simulation(&pattern, &prefix, is_regex);
         return;
+    }
+
+    if no_header {
+        println!("[#] WARNING: No header mode activated. They key will not have the header required by Tor service.");
+    } else{
+        println!("[*] Header mode activated. The kei will be ready to use.");
     }
 
     let (tx, rx) = mpsc::channel();
@@ -72,6 +79,19 @@ fn main() {
                     let file_name = format!("{}/{}.bin", key_dir, address_str);
 
                     let mut file = File::create(&file_name).expect("[!] Failed to create file");
+
+                    if !no_header {
+                        //  To get accepted by Tor service, it must have the following header:
+                        // -------------------------------------------------------------------------------
+                        // 00000000  3d 3d 20 65 64 32 35 35  31 39 76 31 2d 73 65 63  |== ed25519v1-sec|
+                        // 00000010  72 65 74 3a 20 74 79 70  65 30 20 3d 3d 00 00 00  |ret: type0 ==...|
+                        let header: [u8; 32] = [
+                            0x3d, 0x3d, 0x20, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39, 0x76, 0x31, 0x2d, 0x73, 0x65, 0x63,
+                            0x72, 0x65, 0x74, 0x3a, 0x20, 0x74, 0x79, 0x70, 0x65, 0x30, 0x20, 0x3d, 0x3d, 0x00, 0x00, 0x00,
+                        ];
+                        file.write_all(&header).expect("[!] Failed to write header");
+                    }
+                    
                     file.write_all(&sk.as_bytes()).expect("[!] Failed to write to file");
                     println!("\n[*] Saved private key in {}", &file_name);
 
