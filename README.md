@@ -25,7 +25,7 @@ cargo run --release <prefix> [--simulate] [--no-stop]
 `cargo run --release myprefix`
 
 ### Generate an Address with a Regex Pattern
-`cargo run --release /r^mypattern.*`
+`cargo run --release r/^mypattern.*`
 ### Run in Simulation Mode
 `cargo run --release myprefix --simulate`
 
