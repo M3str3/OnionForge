@@ -1,10 +1,21 @@
+# OnionForge - High-performance Tor .onion address generator
+# Supports both CPU and GPU-accelerated key generation using NVIDIA CUDA
 [package]
 name = "onionforge"
 version = "0.1.0"
 edition = "2018"
+build = "build.rs"  # Custom build script for CUDA kernel compilation
 
 [dependencies]
+# Tor utilities for onion address generation and key handling
 torut = "0.2"
+# Random number generation for cryptographic operations
 rand = "0.8"
+# CPU core detection for optimal thread allocation
 num_cpus = "1.13"
+# Regular expression support for pattern matching
 regex = "1.10.4"
+# Dynamic library loading for CUDA runtime
+libloading = "0.8"
+# Ed25519 cryptographic operations
+ed25519-dalek = "1"

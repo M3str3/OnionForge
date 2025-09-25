@@ -19,6 +19,7 @@ cargo run --release <prefix> [--simulate] [--no-stop]
 - `--simulate`: Run the program in simulation mode for 10 seconds to estimate generation time.
 - `--no-stop`: Continue generating and saving keys even after finding a match.
 - `--no-header`: Do not include the header required by Tor service (`ed25519v1-secret: type0`).
+- `--gpu`: Enable GPU acceleration for key generation (experimental). Note: Current GPU implementation may not provide significant performance improvements over CPU processing.
 
 ## Examples
 ### Generate an Address with a Specific Prefix
@@ -38,3 +39,13 @@ No simulation mode for regex patterns
 - `torut` crate for Tor Onion service key generation.
 - `regex` crate for regex pattern matching.
 - `num_cpus` crate for detecting the number of CPUs.
+
+## Setting up a Hidden Service with Generated Keys
+
+1. Generate a key with the header using the program (if you used `--no-header`, manually add the header `ed25519v1-secret: type0` to the key file)
+2. Set up a web server (Nginx, Apache, etc.)
+3. Edit `/etc/tor/torrc` and configure HiddenService directory and port
+4. Restart Tor service to create the folder and initial files (some systems use `tor@default` service name)
+5. Copy the generated key to the HiddenService folder with the name `hs_ed25519_secret_key`
+6. Restart the Tor service
+7. Verify with `cat /path/to/hidden/service/hostname` to check the onion URL
