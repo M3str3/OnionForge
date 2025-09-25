@@ -74,8 +74,8 @@ pub mod nvidia {
     const CUDA_SUCCESS: CUresult = 0;
     const GPU_BATCH_SIZE: usize = 16384; // Increased from 1024 to 16384 for better parallelization
     const GPU_SEED_BYTES: usize = 32;
-    const GPU_CACHE_SIZE: usize = 65536; // Larger cache to reduce GPU calls
-    
+    const GPU_CACHE_SIZE: usize = GPU_BATCH_SIZE * 8;
+
     // Constants for cuModuleLoadDataEx JIT compilation options
     const CU_JIT_ERROR_LOG_BUFFER: u32 = 0;
     const CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES: u32 = 1;
@@ -97,40 +97,58 @@ pub mod nvidia {
     impl OptimizedGpuEngine {
         fn new(device_name: String) -> Result<Self, GpuError> {
             let engine = CudaEngine::new()?;
-            
+
             println!("[*] Optimized GPU engine ready on '{}'", device_name);
-            
+
             Ok(Self {
                 cache: Mutex::new(VecDeque::new()),
                 engine: Mutex::new(engine),
                 device_name,
             })
         }
-        
+
         fn generate_single(&self) -> Result<TorSecretKeyV3, GpuError> {
-            // First try to get a key from cache
-            {
-                let mut cache = self.cache.lock().expect("GPU cache poisoned");
-                if let Some(key) = cache.pop_front() {
-                    return Ok(key);
-                }
+            if let Some(key) = self.take_cached_key() {
+                return Ok(key);
             }
-            
-            // If cache is empty, generate a large batch
-            {
-                let mut engine = self.engine.lock().expect("GPU engine poisoned");
-                let keys = engine.generate_batch(GPU_BATCH_SIZE * 8)?; // Very large batch
-                
-                let mut cache = self.cache.lock().expect("GPU cache poisoned");
-                cache.extend(keys);
-                cache.pop_front().ok_or_else(|| {
-                    GpuError::ExecutionFailed("GPU cache unexpectedly empty.".into())
-                })
+
+            let mut engine = self.engine.lock().expect("GPU engine poisoned");
+
+            if let Some(key) = self.take_cached_key() {
+                return Ok(key);
             }
+
+            let batch = engine.generate_batch(GPU_BATCH_SIZE * 8)?;
+            drop(engine);
+
+            self.store_batch_and_take_one(batch)
         }
-        
+
         fn label(&self) -> String {
             format!("CUDA optimized batching")
+        }
+
+        fn take_cached_key(&self) -> Option<TorSecretKeyV3> {
+            let mut cache = self.cache.lock().expect("GPU cache poisoned");
+            cache.pop_front()
+        }
+
+        fn store_batch_and_take_one(
+            &self,
+            batch: Vec<TorSecretKeyV3>,
+        ) -> Result<TorSecretKeyV3, GpuError> {
+            let mut iter = batch.into_iter();
+            let first = iter.next().ok_or_else(|| {
+                GpuError::ExecutionFailed("GPU batch generation returned no keys.".into())
+            })?;
+
+            let mut cache = self.cache.lock().expect("GPU cache poisoned");
+            let remaining_capacity = GPU_CACHE_SIZE.saturating_sub(cache.len());
+            if remaining_capacity > 0 {
+                cache.extend(iter.take(remaining_capacity));
+            }
+
+            Ok(first)
         }
     }
 
@@ -178,7 +196,13 @@ pub mod nvidia {
         cu_ctx_destroy: unsafe extern "C" fn(CUcontext) -> CUresult,
         cu_ctx_set_current: unsafe extern "C" fn(CUcontext) -> CUresult,
         cu_module_load_data: unsafe extern "C" fn(*mut CUmodule, *const c_void) -> CUresult,
-        cu_module_load_data_ex: unsafe extern "C" fn(*mut CUmodule, *const c_void, u32, *mut u32, *mut *mut c_void) -> CUresult,
+        cu_module_load_data_ex: unsafe extern "C" fn(
+            *mut CUmodule,
+            *const c_void,
+            u32,
+            *mut u32,
+            *mut *mut c_void,
+        ) -> CUresult,
         cu_module_unload: unsafe extern "C" fn(CUmodule) -> CUresult,
         cu_module_get_function:
             unsafe extern "C" fn(*mut CUfunction, CUmodule, *const c_char) -> CUresult,
@@ -271,7 +295,7 @@ pub mod nvidia {
 
                 let ptx = CString::new(PTX_SOURCE).expect("PTX string contains NUL byte");
                 let mut module: CUmodule = ptr::null_mut();
-                
+
                 // Use cuModuleLoadDataEx with logging for better debugging
                 let mut log = vec![0i8; 8192];
                 let mut log_size: usize = log.len();
@@ -285,7 +309,7 @@ pub mod nvidia {
                     &mut log_size as *mut _ as *mut c_void,
                     ptr::null_mut(),
                 ];
-                
+
                 let result = (api.cu_module_load_data_ex)(
                     &mut module,
                     ptx.as_ptr() as *const c_void,
@@ -293,7 +317,7 @@ pub mod nvidia {
                     opts.as_mut_ptr(),
                     optvals.as_mut_ptr(),
                 );
-                
+
                 if result != CUDA_SUCCESS {
                     // Print error log if compilation fails
                     let log_str = CStr::from_ptr(log.as_ptr()).to_string_lossy();
@@ -373,22 +397,51 @@ pub mod nvidia {
                     self.launch_kernel(chunk_size)?;
                 }
 
-                for seed_bytes in self
-                    .host_buffer
-                    .chunks_exact(GPU_SEED_BYTES)
-                    .take(chunk_size)
-                {
-                    let mut seed = [0u8; GPU_SEED_BYTES];
-                    seed.copy_from_slice(seed_bytes);
-                    let secret = SecretKey::from_bytes(&seed).map_err(|err| {
-                        GpuError::ExecutionFailed(format!(
-                            "Invalid seed produced by CUDA kernel: {}",
-                            err
-                        ))
-                    })?;
-                    let expanded = ExpandedSecretKey::from(&secret);
-                    result.push(TorSecretKeyV3::from(expanded.to_bytes()));
-                }
+                let seed_bytes_slice = &self.host_buffer[..chunk_size * GPU_SEED_BYTES];
+                let available_workers = num_cpus::get().max(1);
+                let worker_count = available_workers.min(chunk_size.max(1));
+                let chunk_per_worker = (chunk_size + worker_count - 1) / worker_count;
+                let bytes_per_worker = chunk_per_worker * GPU_SEED_BYTES;
+                let result_ref = &mut result;
+
+                thread::scope(|scope| -> Result<(), GpuError> {
+                    let mut handles = Vec::new();
+
+                    for seeds_chunk in seed_bytes_slice.chunks(bytes_per_worker) {
+                        handles.push(scope.spawn(
+                            move || -> Result<Vec<TorSecretKeyV3>, GpuError> {
+                                let mut local =
+                                    Vec::with_capacity(seeds_chunk.len() / GPU_SEED_BYTES);
+
+                                for seed_bytes in seeds_chunk.chunks_exact(GPU_SEED_BYTES) {
+                                    let mut seed = [0u8; GPU_SEED_BYTES];
+                                    seed.copy_from_slice(seed_bytes);
+                                    let secret = SecretKey::from_bytes(&seed).map_err(|err| {
+                                        GpuError::ExecutionFailed(format!(
+                                            "Invalid seed produced by CUDA kernel: {}",
+                                            err
+                                        ))
+                                    })?;
+                                    let expanded = ExpandedSecretKey::from(&secret);
+                                    local.push(TorSecretKeyV3::from(expanded.to_bytes()));
+                                }
+
+                                Ok(local)
+                            },
+                        ));
+                    }
+
+                    for handle in handles {
+                        let partial = handle.join().map_err(|_| {
+                            GpuError::ExecutionFailed(
+                                "GPU conversion worker thread panicked.".into(),
+                            )
+                        })??;
+                        result_ref.extend(partial);
+                    }
+
+                    Ok(())
+                })?;
 
                 remaining -= chunk_size;
             }
